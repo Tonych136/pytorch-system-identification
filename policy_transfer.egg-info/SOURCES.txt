@@ -1,0 +1,9 @@
+README.md
+setup.py
+policy_transfer/__init__.py
+policy_transfer/test_policy.py
+policy_transfer.egg-info/PKG-INFO
+policy_transfer.egg-info/SOURCES.txt
+policy_transfer.egg-info/dependency_links.txt
+policy_transfer.egg-info/requires.txt
+policy_transfer.egg-info/top_level.txt
