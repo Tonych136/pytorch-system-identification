@@ -132,7 +132,7 @@ def main():
             masks = torch.FloatTensor(
                 [[0.0] if done_ else [1.0] for done_ in done])
             bad_masks = torch.FloatTensor(
-                [[0.0] if 'bad_transition' in info.keys() else [1.0]
+                [[0.0] if 'bad_transition' in infos.keys() else [1.0]
                  for info in infos])
             rollouts.insert(obs, recurrent_hidden_states, action,
                             action_log_prob, value, reward, masks, bad_masks)
@@ -321,8 +321,13 @@ def learn(env,max_timesteps,
                         np.median(episode_rewards), np.min(episode_rewards),
                         np.max(episode_rewards), dist_entropy, value_loss,
                         action_loss))
+        if (args.eval_interval is not None and len(episode_rewards) > 1
+                and j % args.eval_interval == 0):
+            ob_rms = utils.get_vec_normalize(envs).ob_rms
+            evaluate(actor_critic, ob_rms, args.env_name, args.seed,
+                     args.num_processes, eval_log_dir, device)
     
-
+    '''
     total = 0
     rollouts = RolloutStorage(num_step, 1,
                               env.observation_space.shape, env.action_space,
@@ -358,6 +363,7 @@ def learn(env,max_timesteps,
         print(cur_ep_len)
         total = total + cur_ep_ret
     print(total/100)
+    '''
 
 
 

@@ -17,6 +17,45 @@ def osi_train_callback(model, name, iter):
     params = model.get_variable_dict()
     joblib.dump(params, logger.get_dir()+'/osi_params.pkl', compress=True)
 
+class policy_normalization_remove:
+    def __init__(self, policy, ob_rms, device, env):
+        self.policy = policy
+        self.ob_rms = ob_rms
+        self.eval_recurrent_hidden_states = torch.zeros(
+            1, self.policy.recurrent_hidden_state_size, device=device)
+        self.eval_masks = torch.zeros(1, 1, device=device)
+        self.device = device
+        self.env = env
+        self.obs = self.env.reset()
+    def act(self, random = False):
+        ob = torch.tensor([np.clip((self.obs - self.ob_rms.mean) /
+                      np.sqrt(self.ob_rms.var + 1e-08),
+                      -10.0, 10.0)],
+                      dtype=torch.float32,
+                      device=self.device)
+        with torch.no_grad():
+            _, action, _, self.eval_recurrent_hidden_states = actor_critic.act(
+                ob,
+                self.eval_recurrent_hidden_states,
+                self.eval_masks,
+                deterministic=True)
+        if random:
+            self.obs, rew, done, infos = self.env.step(action[0].cpu().numpy() + np.random.normal(0, args.action_noise, len(action[0].cpu().numpy())))
+        else:
+            self.obs, rew, done, infos = self.env.step(action[0].cpu().numpy())
+        self.eval_masks = torch.tensor(
+            [[0.0] if done else [1.0]],
+            dtype=torch.float32,
+            device=self.device)
+        return self.obs, rew, done, infos
+    def reset(self):
+        o = self.env.reset()
+        self.obs = o
+        self.eval_recurrent_hidden_states = torch.zeros(
+            1, self.policy.recurrent_hidden_state_size, device=device)
+        self.eval_masks = torch.zeros(1, 1, device=device)
+        return o
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -84,56 +123,68 @@ if __name__ == '__main__':
                             hid_size=64, num_hid_layers=3, observation_permutation=env_up.env.obs_perm,
                             action_permutation=env_up.env.act_perm, soft_mirror=False)
 
-    test_param_dict = locals()
-    with open(logger.get_dir() + "/testinfo.txt", "w") as text_file:
-        text_file.write(str(test_param_dict))
+    #test_param_dict = locals()
+    #with open(logger.get_dir() + "/testinfo.txt", "w") as text_file:
+    #    text_file.write(str(test_param_dict))
 
     if 'mirror' in policy_path:
         pol_fn = policy_mirror_fn
     else:
         pol_fn = policy_fn
+    
+    result = torch.load("/home/tonyyang/Desktop/policy_transfer/policy_transfer/ppo/pytorch_ppo/trained_copy/ppo/UniversalPolicy.pt")
+    actor_critic = result[0]
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    actor_critic.to(device)
+    ob_rms = result[1]
 
-    up_policy = pol_fn("pi_test", env_up.observation_space, env_up.action_space)
-    policy_params = joblib.load(policy_path)
+    #up_policy = pol_fn("pi_test", env_up.observation_space, env_up.action_space)
+    #policy_params = joblib.load(policy_path)
 
     # define osi model and optimizer
-    osi = MLP(name='osi', in_dim=env_hist.observation_space.shape[0], out_dim=len(dyn_params), layers=[256, 128, 64],
-              activation=tf.nn.relu, last_activation=None, dropout=0.1)
+    #osi = MLP(name='osi', in_dim=env_hist.observation_space.shape[0], out_dim=len(dyn_params), layers=[256, 128, 64],
+    #          activation=tf.nn.relu, last_activation=None, dropout=0.1)
+    osi = torch.load("/home/tonyyang/Desktop/policy_transfer/policy_transfer/uposi/osi.pt")
 
-    sess = tf.InteractiveSession()
-    U.initialize()
 
-    cur_scope = up_policy.get_variables()[0].name[0:up_policy.get_variables()[0].name.find('/')]
-    orig_scope = list(policy_params.keys())[0][0:list(policy_params.keys())[0].find('/')]
+    #sess = tf.InteractiveSession()
+    #U.initialize()
 
-    vars = up_policy.get_variables()
-    for i in range(len(up_policy.get_variables())):
-        assign_op = up_policy.get_variables()[i].assign(
-            policy_params[up_policy.get_variables()[i].name.replace(cur_scope, orig_scope, 1)])
-        sess.run(assign_op)
+    #cur_scope = up_policy.get_variables()[0].name[0:up_policy.get_variables()[0].name.find('/')]
+    #orig_scope = list(policy_params.keys())[0][0:list(policy_params.keys())[0].find('/')]
 
-    osi.set_variable_from_dict(joblib.load(osi_path))
+    #vars = up_policy.get_variables()
+    #for i in range(len(up_policy.get_variables())):
+    #    assign_op = up_policy.get_variables()[i].assign(
+    #        policy_params[up_policy.get_variables()[i].name.replace(cur_scope, orig_scope, 1)])
+    #    sess.run(assign_op)
 
-    osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params))
+    #osi.set_variable_from_dict(joblib.load(osi_path))
+
+    osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params),TF_used = False)
 
     env_hist.env.resample_MP = True
 
     env_hist.reset()
 
     total_reward = 0
-    #while True:
+    import ipdb
+    ipdb.set_trace()
     for i in range(100):
         #input('Press enter to start the next rollout...')
-        o = osi_env.reset()
+        #o = osi_env.reset()
 
         true_mp = []
         pred_mp = []
         length = 0
         one_error = 0
         reward = 0
+        policy = policy_normalization_remove(actor_critic, ob_rms, device, osi_env)
+        policy.reset()
         while True:
-            act, _ = up_policy.act(False, o)
-            o, r, d, _ = osi_env.step(act)
+            #act, _ = up_policy.act(False, o)
+            #o, r, d, _ = osi_env.step(act)
+            o, r, d, _ = policy.act()
             reward = reward + r
             true_mp.append(np.copy(osi_env.env.param_manager.get_simulator_parameters()))
             pred_mp.append(np.copy(o[-len(dyn_params):]))

@@ -9,12 +9,25 @@ from policy_transfer.policies.mlp_policy import *
 from baselines import logger
 from baselines.common import tf_util as U
 from baselines.common.mpi_adam import MpiAdam
+from baselines.common.running_mean_std import RunningMeanStd
 from mpi4py import MPI
-from module.mlp import MLP as mlp
+
+import gym
+import numpy as np
 import torch
-import torch.optim as optim
 import torch.nn as nn
-from baselines.common import Dataset
+import torch.nn.functional as F
+import torch.optim as optim
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from a2c_ppo_acktr import algo, utils
+from a2c_ppo_acktr.algo import gail
+from a2c_ppo_acktr.arguments import get_args
+from a2c_ppo_acktr.envs import make_vec_envs
+from a2c_ppo_acktr.model import Policy
+from a2c_ppo_acktr.storage import RolloutStorage
 
 def osi_train_callback(model, name, iter):
     params = model.get_variable_dict()
@@ -153,42 +166,36 @@ if __name__ == '__main__':
 
 
     # configure things and load the learned universal policy
-    config_name = 'data/osi_data/' + name + '_' + args.env + '_' + str(dyn_params)
+    #config_name = 'data/osi_data/' + name + '_' + args.env + '_' + str(dyn_params)
 
-    logger.configure(config_name, ['json', 'stdout'])
+    #logger.configure(config_name, ['json', 'stdout'])
 
-    test_param_dict = locals()
-    with open(logger.get_dir() + "/testinfo.txt", "w") as text_file:
-        text_file.write(str(test_param_dict))
+    #test_param_dict = locals()
+    #with open(logger.get_dir() + "/testinfo.txt", "w") as text_file:
+    #    text_file.write(str(test_param_dict))
 
-    if 'mirror' in policy_path:
-        pol_fn = policy_mirror_fn
-    else:
-        pol_fn = policy_fn
+    #if 'mirror' in policy_path:
+    #    pol_fn = policy_mirror_fn
+    #else:
+    #    pol_fn = policy_fn
 
     #up_policy = pol_fn("pi_test", env_up.observation_space, env_up.action_space)
     #policy_params = joblib.load(policy_path)
 
     result = torch.load("/home/tonyyang/Desktop/policy_transfer/policy_transfer/ppo/pytorch_ppo/trained_copy/ppo/UniversalPolicy.pt")
     actor_critic = result[0]
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1")
     actor_critic.to(device)
     ob_rms = result[1]
 
     # define osi model and optimizer
-    #osi = MLP(name='osi', in_dim=env_hist.observation_space.shape[0], out_dim=len(dyn_params), layers=[256, 128, 64],
-    #          activation=tf.nn.relu, last_activation=None, dropout=0.1)
-    #updater = MpiAdam(osi.get_trainable_variables())
-    #optimizer = RegressorOptimizer(osi, updater)
+    osi = MLP(name='osi', in_dim=env_hist.observation_space.shape[0], out_dim=len(dyn_params), layers=[256, 128, 64],
+              activation=tf.nn.relu, last_activation=None, dropout=0.1)
+    updater = MpiAdam(osi.get_trainable_variables())
+    optimizer = RegressorOptimizer(osi, updater)
 
-    osi = mlp(env_hist.observation_space.shape[0], [256,128,64,len(dyn_params)], 0.1)
-    osi.to(device)
-    osi.train()
-    criterion = nn.MSELoss()
-    optimizer = optim.SGD(osi.parameters(), lr=0.01, momentum=0.9)
-
-    #sess = tf.InteractiveSession()
-    #U.initialize()
+    sess = tf.InteractiveSession()
+    U.initialize()
 
     #cur_scope = up_policy.get_variables()[0].name[0:up_policy.get_variables()[0].name.find('/')]
     #orig_scope = list(policy_params.keys())[0][0:list(policy_params.keys())[0].find('/')]
@@ -199,10 +206,9 @@ if __name__ == '__main__':
     #        policy_params[up_policy.get_variables()[i].name.replace(cur_scope, orig_scope, 1)])
     #    sess.run(assign_op)
 
-    #osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params))
-    osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params), TF_used = False)
+    osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params))
 
-    #updater.sync()
+    updater.sync()
 
     env_up.env.resample_MP = True
     env_hist.env.resample_MP = True
@@ -216,13 +222,15 @@ if __name__ == '__main__':
     input_data = []
     output_data = []
 
+    
+
     seed = 1000
     num_processes = 1
+
     for iter in range(osi_iteration):
         print('------------- Iter ', iter, ' ----------------')
         # collect samples
         env_to_use = env_up
-        osi.train()
         if iter > 0:
             env_to_use = osi_env
 
@@ -239,18 +247,30 @@ if __name__ == '__main__':
             while True:
                 true_dyn = env_to_use.env.param_manager.get_simulator_parameters()
                 cur_state = env_to_use.env.state_vector()
+                #if iter == 0:
+                #    true_dyn = env_to_use.envs[0].env.param_manager.get_simulator_parameters()
+                #else:
+                #    true_dyn = env_to_use.envs[0].env.env.param_manager.get_simulator_parameters()
+                #cur_state = env_to_use.envs[0].env.state_vector()
+
 
                 if iter == 0:
                     env_hist.env.set_state_vector(cur_state)
+                    #env_hist.envs[0].env.set_state_vector(cur_state)
                     osi_input = env_hist.env._get_obs()
+                    #osi_input = env_hist.envs[0].env.env.env._get_obs() 
                 else:
                     osi_input = env_to_use.env._get_obs()
+                    #osi_input = env_to_use.envs[0].env.env._get_obs()
                 input_data.append(osi_input)
                 output_data.append(true_dyn)
+                o, r, d, _ = policy.act(random = True)
 
                 #act, _ = up_policy.act(True, o)
-                #o, r, d, _ = env_to_use.step(act + np.random.normal(0, args.action_noise, len(act)))
-                o, r, d, _ = policy.act(random = True)
+                
+                #o, r, d, _ = env_to_use.step(
+                #    act.cpu().numpy() + np.random.normal(0, args.action_noise, len(act)))
+
                 length += 1
                 collected_data_size += 1
 
@@ -258,33 +278,11 @@ if __name__ == '__main__':
                     lengths.append(length)
                     break
         print('Average rollout length: ', np.mean(lengths))
-
-
-
-        dataset = Dataset(dict(X=np.array(np.array(input_data)), Y=np.array(np.array(output_data))), shuffle=True)
-        losses = []
-        for iter in range(300):
-            loss_epoch = []
-            for batch in dataset.iterate_once(64):
-                batch["X"] = torch.tensor(batch["X"], dtype=torch.float32, device=device)
-                batch["Y"] = torch.tensor(batch["Y"], dtype=torch.float32, device=device)
-                optimizer.zero_grad()
-                outputs = osi(batch["X"])
-                loss = criterion(outputs, batch["Y"])
-                loss.backward()
-                optimizer.step()
-                loss_epoch.append(float(loss))
-            losses.append(np.mean(loss_epoch))
-            if iter % 5 == 0:
-                print('iter: ', iter, 'loss: ', np.mean(loss_epoch))
-        
-        torch.save(osi,"/home/tonyyang/Desktop/policy_transfer/policy_transfer/uposi/osi.pt")
-
         #print(input_data.shape, output_data.shape)
         # update osi model
-        #optimizer.fit_data(np.array(input_data), np.array(output_data), iter_num = 200, save_model_callback=osi_train_callback)
-        #params = osi.get_variable_dict()
-        #joblib.dump(params, logger.get_dir() + '/osi_params_'+str(iter)+'.pkl', compress=True)
+        optimizer.fit_data(np.array(input_data), np.array(output_data), iter_num = 200, save_model_callback=osi_train_callback)
+        params = osi.get_variable_dict()
+        joblib.dump(params, logger.get_dir() + '/osi_params_'+str(iter)+'.pkl', compress=True)
 
 
 

@@ -10,11 +10,29 @@ from baselines import logger
 from baselines.common import tf_util as U
 from baselines.common.mpi_adam import MpiAdam
 from mpi4py import MPI
-from module.mlp import MLP as mlp
+import copy
+import glob
+import os
+import time
+from collections import deque
+
+import gym
+import numpy as np
 import torch
-import torch.optim as optim
 import torch.nn as nn
-from baselines.common import Dataset
+import torch.nn.functional as F
+import torch.optim as optim
+import sys
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from a2c_ppo_acktr import algo, utils
+from a2c_ppo_acktr.algo import gail
+from a2c_ppo_acktr.arguments import get_args
+from a2c_ppo_acktr.envs import make_vec_envs
+from a2c_ppo_acktr.model import Policy
+from a2c_ppo_acktr.storage import RolloutStorage
+from evaluation import evaluate
 
 def osi_train_callback(model, name, iter):
     params = model.get_variable_dict()
@@ -59,6 +77,7 @@ class policy_normalization_remove:
         self.eval_masks = torch.zeros(1, 1, device=device)
         return o
 
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -69,7 +88,7 @@ if __name__ == '__main__':
     parser.add_argument('--policy_path', help='path to policy', type=str, default="")
     parser.add_argument('--dyn_params', action='append', type=int)
 
-    parser.add_argument('--osi_iteration', help='number of iterations', type=int, default=6)
+    parser.add_argument('--osi_iteration', help='number of iterations', type=int, default=100)
     parser.add_argument('--training_sample_num', help='number of training samples per iteration', type=int, default=20000)
     parser.add_argument('--action_noise', help='noise added to action', type=float, default=0.0)
 
@@ -131,6 +150,13 @@ if __name__ == '__main__':
         env_up.env.param_manager.activated_param = dyn_params
         env_up.env.param_manager.controllable_param = dyn_params
         env_up.env.obs_dim += len(dyn_params)
+        env_up.env.UP_noise_level = False
+        env_up.env.noisy_input = False
+        env_up.env.resample_MP = True
+
+        env_up.env.param_manager.resample_parameters()
+        #print(env_up.env.)
+        #exit(0)
 
         high = np.inf * np.ones(env_up.env.obs_dim)
         low = -high
@@ -151,141 +177,104 @@ if __name__ == '__main__':
                             hid_size=64, num_hid_layers=3, observation_permutation=env_up.env.obs_perm,
                             action_permutation=env_up.env.act_perm, soft_mirror=False)
 
-
-    # configure things and load the learned universal policy
-    config_name = 'data/osi_data/' + name + '_' + args.env + '_' + str(dyn_params)
-
-    logger.configure(config_name, ['json', 'stdout'])
-
-    test_param_dict = locals()
-    with open(logger.get_dir() + "/testinfo.txt", "w") as text_file:
-        text_file.write(str(test_param_dict))
-
-    if 'mirror' in policy_path:
-        pol_fn = policy_mirror_fn
-    else:
-        pol_fn = policy_fn
-
-    #up_policy = pol_fn("pi_test", env_up.observation_space, env_up.action_space)
-    #policy_params = joblib.load(policy_path)
-
     result = torch.load("/home/tonyyang/Desktop/policy_transfer/policy_transfer/ppo/pytorch_ppo/trained_copy/ppo/UniversalPolicy.pt")
     actor_critic = result[0]
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0")
     actor_critic.to(device)
-    ob_rms = result[1]
+    env = env_up
 
-    # define osi model and optimizer
-    #osi = MLP(name='osi', in_dim=env_hist.observation_space.shape[0], out_dim=len(dyn_params), layers=[256, 128, 64],
-    #          activation=tf.nn.relu, last_activation=None, dropout=0.1)
-    #updater = MpiAdam(osi.get_trainable_variables())
-    #optimizer = RegressorOptimizer(osi, updater)
+    '''
+    total = 0
 
-    osi = mlp(env_hist.observation_space.shape[0], [256,128,64,len(dyn_params)], 0.1)
-    osi.to(device)
-    osi.train()
-    criterion = nn.MSELoss()
-    optimizer = optim.SGD(osi.parameters(), lr=0.01, momentum=0.9)
+    eval_recurrent_hidden_states = torch.zeros(1,
+        actor_critic.recurrent_hidden_state_size, device=device)
+    eval_masks = torch.zeros(1,1, device=device)
 
-    #sess = tf.InteractiveSession()
-    #U.initialize()
+    for iter in range(100):
+        obs = env.reset()
+        cur_ep_len = 0
+        cur_ep_ret = 0
+        print('------------- Iter ', iter, ' ----------------')
+        step = 0
+        while True:
+            with torch.no_grad():
+                value, action, action_log_prob, recurrent_hidden_states = actor_critic.act(
+                torch.tensor( [obs],dtype=torch.float32, device=device ),
+                eval_recurrent_hidden_states,
+                eval_masks,
+                deterministic=True)
 
-    #cur_scope = up_policy.get_variables()[0].name[0:up_policy.get_variables()[0].name.find('/')]
-    #orig_scope = list(policy_params.keys())[0][0:list(policy_params.keys())[0].find('/')]
+            obs, reward, done, infos = env.step(action[0].cpu().numpy())
+            print(reward)
+            
+            eval_masks = torch.tensor(
+            [[0.0] if done else [1.0]],
+            dtype=torch.float32,
+            device=device)
 
-    #vars = up_policy.get_variables()
-    #for i in range(len(up_policy.get_variables())):
-    #    assign_op = up_policy.get_variables()[i].assign(
-    #        policy_params[up_policy.get_variables()[i].name.replace(cur_scope, orig_scope, 1)])
-    #    sess.run(assign_op)
-
-    #osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params))
-    osi_env = OSIEnvWrapper(env_hist, osi, OSI_hist, len(dyn_params), TF_used = False)
-
-    #updater.sync()
-
-    env_up.env.resample_MP = True
-    env_hist.env.resample_MP = True
-
-    env_up.seed(seed + MPI.COMM_WORLD.Get_rank())
-    env_hist.seed(seed + MPI.COMM_WORLD.Get_rank())
-
-    env_up.reset()
-    env_hist.reset()
-
-    input_data = []
-    output_data = []
-
+            cur_ep_ret += reward
+            cur_ep_len += 1
+            step+=1
+            if done:
+                break
+        print(cur_ep_ret)
+        print(cur_ep_len)
+        total = total + cur_ep_ret
+    print(total/100)
+    '''
     seed = 1000
     num_processes = 1
-    for iter in range(osi_iteration):
-        print('------------- Iter ', iter, ' ----------------')
-        # collect samples
-        env_to_use = env_up
-        osi.train()
-        if iter > 0:
-            env_to_use = osi_env
+    eval_log_dir = ""
+    eval_envs = make_vec_envs(env, seed + num_processes, num_processes,
+                              None, eval_log_dir, device, True)
+    eval_envs.eval()
 
-        lengths = []
-        collected_data_size = 0
-        policy = policy_normalization_remove(actor_critic, ob_rms, device, env_to_use)
-        while collected_data_size < training_sample_num:
-            env_up.reset()
-            env_hist.reset()
-            # collect one trajectory
-            #o = env_to_use.reset()
-            o = policy.reset()
-            length = 0
-            while True:
-                true_dyn = env_to_use.env.param_manager.get_simulator_parameters()
-                cur_state = env_to_use.env.state_vector()
+    #ob_rms = utils.get_vec_normalize(eval_envs).ob_rms
+    ob_rms = result[1]
 
-                if iter == 0:
-                    env_hist.env.set_state_vector(cur_state)
-                    osi_input = env_hist.env._get_obs()
-                else:
-                    osi_input = env_to_use.env._get_obs()
-                input_data.append(osi_input)
-                output_data.append(true_dyn)
+    #vec_norm = utils.get_vec_normalize(eval_envs)
+    #if vec_norm is not None:
+    #    vec_norm.eval()
+    #    vec_norm.ob_rms = ob_rms
+    policy = policy_normalization_remove(actor_critic, ob_rms, device, env)
 
-                #act, _ = up_policy.act(True, o)
-                #o, r, d, _ = env_to_use.step(act + np.random.normal(0, args.action_noise, len(act)))
-                o, r, d, _ = policy.act(random = True)
-                length += 1
-                collected_data_size += 1
-
-                if d:
-                    lengths.append(length)
-                    break
-        print('Average rollout length: ', np.mean(lengths))
+    #obs = eval_envs.reset()
 
 
+    t =0
+    reward = 0
+    for i in range(100):
+        done = False
+        #obs = eval_envs.reset()
+        #eval_recurrent_hidden_states = torch.zeros(
+        #    num_processes, actor_critic.recurrent_hidden_state_size, device=device)
+        #eval_masks = torch.zeros(num_processes, 1, device=device)
+        policy.reset()
 
-        dataset = Dataset(dict(X=np.array(np.array(input_data)), Y=np.array(np.array(output_data))), shuffle=True)
-        losses = []
-        for iter in range(300):
-            loss_epoch = []
-            for batch in dataset.iterate_once(64):
-                batch["X"] = torch.tensor(batch["X"], dtype=torch.float32, device=device)
-                batch["Y"] = torch.tensor(batch["Y"], dtype=torch.float32, device=device)
-                optimizer.zero_grad()
-                outputs = osi(batch["X"])
-                loss = criterion(outputs, batch["Y"])
-                loss.backward()
-                optimizer.step()
-                loss_epoch.append(float(loss))
-            losses.append(np.mean(loss_epoch))
-            if iter % 5 == 0:
-                print('iter: ', iter, 'loss: ', np.mean(loss_epoch))
-        
-        torch.save(osi,"/home/tonyyang/Desktop/policy_transfer/policy_transfer/uposi/osi.pt")
+        while done == False:
+            '''
+            with torch.no_grad():
+                _, action, _, eval_recurrent_hidden_states = actor_critic.act(
+                    obs,
+                    eval_recurrent_hidden_states,
+                    eval_masks,
+                    deterministic=True)
 
-        #print(input_data.shape, output_data.shape)
-        # update osi model
-        #optimizer.fit_data(np.array(input_data), np.array(output_data), iter_num = 200, save_model_callback=osi_train_callback)
-        #params = osi.get_variable_dict()
-        #joblib.dump(params, logger.get_dir() + '/osi_params_'+str(iter)+'.pkl', compress=True)
+            # Obser reward and next obs
+            obs, rew, done, infos = eval_envs.step(action)
 
+            eval_masks = torch.tensor(
+                [[0.0] if done_ else [1.0] for done_ in done],
+                dtype=torch.float32,
+                device=device)
+            '''
+            obs, rew, done, infos = policy.act()
+            t = t +1
+            reward = rew+reward
 
+        print(reward/(i+1))
 
-
+    eval_envs.close()
+    print(reward/100)
+    #print(" Evaluation using {} steps: reward {:.5f}\n".format(
+    #    t, reward.cpu().numpy()))

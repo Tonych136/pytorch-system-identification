@@ -1,14 +1,21 @@
 import gym
 import numpy as np
 from gym import error, spaces
+import torch
 
 class OSIEnvWrapper:
-    def __init__(self, env, osi, osi_hist, up_dim):
+    def __init__(self, env, osi, osi_hist, up_dim, TF_used = True):
         self.wrapped_env = env
         self.env = env.env # skip a wrapper for retaining other apis
         self.osi = osi
         self.osi_hist = osi_hist
         self.up_dim = up_dim
+
+        #added        
+        self.TF_used = TF_used
+        self.reward_range = self.env.reward_range
+        self.metadata = self.env.metadata
+        self.spec = self.env.spec
 
         high = np.inf * np.ones(int(self.env.obs_dim / osi_hist + up_dim))
         low = -high
@@ -18,7 +25,13 @@ class OSIEnvWrapper:
 
     def process_raw_obs(self, raw_o):
         one_obs_len = int((len(raw_o) - len(self.env.control_bounds[0]) * self.env.include_act_history) / self.env.include_obs_history)
-        pred_mu = self.osi.predict(raw_o)[0]
+        if self.TF_used:
+            pred_mu = self.osi.predict(raw_o)[0]
+        else:
+            self.osi.eval()
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            temp = torch.tensor([raw_o], dtype=torch.float32, device=device)
+            pred_mu = self.osi(temp)[0].cpu().detach().numpy()
         return np.concatenate([raw_o[0:one_obs_len], pred_mu])
 
     def step(self, a):
